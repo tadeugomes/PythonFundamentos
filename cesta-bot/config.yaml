@@ -65,10 +65,10 @@ strategy:
   trailing_stop: 0.12       # sai se cair 12% do pico desde a entrada
   min_hold_weeks: 2         # evita giro excessivo
   regime_sma: 200           # IBOV abaixo da SMA200 => reduz exposição
-  regime_exposure: 0.5      # fração investida em regime desfavorável (1.0 desliga o filtro)
+  regime_exposure: 1.0      # fração investida em regime desfavorável (1.0 desliga o filtro; antigo: 0.5)
   regime_confirm_weeks: 1   # semanas seguidas do outro lado da SMA200 para trocar o regime
-  size_top: 0               # >0: ranking só entre as K mais negociadas (volume financeiro de 252 pregões)
-  weighting: "equal"        # equal (1/n) | liquidity (peso pelo volume financeiro)
+  size_top: 10              # ranking só entre as K mais negociadas (volume financeiro de 252 pregões); 0 desliga
+  weighting: "liquidity"    # liquidity (peso pelo volume financeiro) | equal (1/n, antigo)
   max_weight: 0.25          # teto por ativo com weighting: liquidity
   vol_lookback: 63          # usado no filtro de volatilidade
   max_vol_annual: 0.60      # exclui ativos acima de 60% de vol anualizada
@@ -91,7 +91,7 @@ backtest:
 
 execution:
   mode: "paper"             # paper | telegram | mt5
-  capital_per_position: 500 # R$ por ativo durante o teste
+  capital_per_position: 500 # R$ por ativo com pesos iguais; com liquidity o total é 500 x n_positions
   use_fractional: true      # usa mercado fracionário (sufixo F) para valores pequenos
   state_file: "state/portfolio.json"
   dry_run: true             # com mt5: só simula o envio de ordens

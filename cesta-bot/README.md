@@ -8,9 +8,11 @@ Toda sexta após o fechamento o bot:
 
 1. Baixa 18 meses de preços do Yahoo Finance para o universo em `config.yaml`.
 2. Calcula momentum 12-1, SMA50 e volatilidade de cada ativo. Exclui ROE negativo e alavancagem alta (fundamentos via yfinance, cache mensal).
-3. Verifica o regime: Ibovespa abaixo da SMA200 reduz a exposição para 50%. Na troca de regime, as posições já abertas são reduzidas ou recompostas ao novo tamanho (`strategy.resize_on_regime`).
-4. Vende posições que acionaram o stop móvel (12% do pico), caíram abaixo da SMA50 ou saíram do top 2n de momentum. Compra as melhores ranqueadas até completar a cesta (8 ativos).
+3. Limita o ranking às 10 ações com maior volume financeiro médio em 252 pregões (`strategy.size_top`).
+4. Vende posições que acionaram o stop móvel (12% do pico), caíram abaixo da SMA50 ou saíram do top 2n de momentum. Compra as melhores ranqueadas até completar a cesta (até 8 ativos), com peso proporcional ao volume financeiro e teto de 25% por ativo (`strategy.weighting: liquidity`). Vagas sem candidato acima da SMA50 ficam em caixa.
 5. Registra a carteira em `state/portfolio.json`, envia o resumo no Telegram e, no modo `mt5`, envia as ordens.
+
+Esta configuração (K = 10) é o padrão desde 26/10/2026. Antes, o ranking usava o universo inteiro com pesos iguais e um filtro de regime (Ibovespa abaixo da SMA200 reduzia a exposição para 50%). Para voltar a ela: `size_top: 0`, `weighting: "equal"` e `regime_exposure: 0.5`. O filtro de regime continua disponível em `regime_exposure` e `resize_on_regime`.
 
 O backtest usa só fatores de preço porque não há histórico gratuito confiável de fundamentos. O filtro fundamentalista atua apenas ao vivo.
 
