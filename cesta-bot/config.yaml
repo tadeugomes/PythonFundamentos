@@ -12,15 +12,15 @@ universe:
   - BBSE3
   - BPAC11
   - BRAV3
-  - BRFS3
+  - MBRF3   # BRF + Marfrig (antes BRFS3)
   - CMIG4
-  - CPLE6
+  - CPLE3   # Copel no Novo Mercado (antes CPLE6)
   - CSAN3
   - CSNA3
   - CYRE3
   - EGIE3
-  - ELET3
-  - EMBR3
+  - AXIA3   # antes ELET3 (Eletrobras)
+  - EMBJ3   # antes EMBR3 (Embraer)
   - ENEV3
   - EQTL3
   - GGBR4
@@ -33,7 +33,7 @@ universe:
   - MGLU3
   - MRVE3
   - MULT3
-  - NTCO3
+  - NATU3   # antes NTCO3 (Natura)
   - PETR4
   - PRIO3
   - RADL3
@@ -66,6 +66,7 @@ strategy:
   regime_exposure: 0.5      # fração investida em regime desfavorável
   vol_lookback: 63          # usado no filtro de volatilidade
   max_vol_annual: 0.60      # exclui ativos acima de 60% de vol anualizada
+  resize_on_regime: true    # na troca de regime, reduz/recompõe as posições já abertas
 
 costs:
   commission: 0.0           # XP: corretagem zero em ações via plataforma
@@ -76,6 +77,8 @@ backtest:
   start: "2015-01-01"
   initial_capital: 100000
   cdi_annual: 0.11          # usado só como referência fixa se a série do BCB falhar
+  execution: "next_open"    # next_open (como ao vivo) | close (mesmo fechamento do sinal)
+  cash_yield: true          # caixa parado rende CDI
 
 execution:
   mode: "paper"             # paper | telegram | mt5

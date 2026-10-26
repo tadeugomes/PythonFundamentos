@@ -4,15 +4,19 @@ Bot de cesta de ações da B3 com decisão semanal, backtest contra Ibovespa e C
 
 ## Como funciona
 
-Toda sexta (ou segunda antes da abertura) o bot:
+Toda sexta após o fechamento o bot:
 
 1. Baixa 18 meses de preços do Yahoo Finance para o universo em `config.yaml`.
 2. Calcula momentum 12-1, SMA50 e volatilidade de cada ativo. Exclui ROE negativo e alavancagem alta (fundamentos via yfinance, cache mensal).
-3. Verifica o regime: Ibovespa abaixo da SMA200 reduz a exposição para 50%.
+3. Verifica o regime: Ibovespa abaixo da SMA200 reduz a exposição para 50%. Na troca de regime, as posições já abertas são reduzidas ou recompostas ao novo tamanho (`strategy.resize_on_regime`).
 4. Vende posições que acionaram o stop móvel (12% do pico), caíram abaixo da SMA50 ou saíram do top 2n de momentum. Compra as melhores ranqueadas até completar a cesta (8 ativos).
 5. Registra a carteira em `state/portfolio.json`, envia o resumo no Telegram e, no modo `mt5`, envia as ordens.
 
 O backtest usa só fatores de preço porque não há histórico gratuito confiável de fundamentos. O filtro fundamentalista atua apenas ao vivo.
+
+O sinal usa o fechamento de sexta e, no backtest, as ordens são executadas na abertura do pregão seguinte (`backtest.execution: next_open`), como acontece ao vivo. O caixa parado rende CDI (`backtest.cash_yield`). O CDI vem da série 12 do SGS/BCB, consultada em janelas de 5 anos porque o BCB limita séries diárias a 10 anos por consulta. Se o BCB falhar, o backtest avisa e usa `cdi_annual` fixo.
+
+Se a rodada acontecer antes das 18h de um dia de pregão, a barra do dia é descartada, porque ainda não é o fechamento.
 
 ## Instalação
 
@@ -21,7 +25,15 @@ pip install -r requirements.txt
 python backtest.py            # ~2 min na primeira vez (baixa desde 2013)
 ```
 
-Saída em `output/backtest.csv`, `output/trades.csv` e `output/backtest.png`. Rode variações: `python backtest.py --start 2020-01-01`. Mude parâmetros em `config.yaml` e compare. Desconfie de qualquer combinação que só funciona com um conjunto estreito de valores.
+Saída em `output/backtest.csv`, `output/trades.csv` e `output/backtest.png`. Rode variações: `python backtest.py --start 2020-01-01`. Para medir o efeito de cada premissa: `--execution close`, `--no-cash-yield`, `--no-resize` e `--out output/variante`. Mude parâmetros em `config.yaml` e compare. Desconfie de qualquer combinação que só funciona com um conjunto estreito de valores.
+
+O cache de preços (`cache/prices_close.parquet` e `cache/prices_open.parquet`) só é usado se cobrir a data de início pedida. A rodada semanal baixa os dados sem ler nem gravar esse cache.
+
+### Viés de sobrevivência
+
+O universo é a lista atual de ações do Ibovespa aplicada ao passado. Empresas que saíram do índice ou da bolsa desde 2015 não entram no teste, e empresas que só entraram no índice depois de subir entram desde o início. Isso favorece a cesta na comparação com o Ibovespa. O relatório mostra quantos ativos tinham cotação na data inicial. Não há fonte gratuita da composição histórica do índice. Trate o excesso sobre o Ibovespa como limite superior.
+
+Tickers que mudam de código somem do Yahoo com todo o histórico. O bot avisa quando um ativo do universo vem sem cotação. Em 2025 e 2026 mudaram BRFS3 (MBRF3), CPLE6 (CPLE3), ELET3 (AXIA3), EMBR3 (EMBJ3) e NTCO3 (NATU3).
 
 ## Modos de execução
 
@@ -48,19 +60,23 @@ Ordem recomendada: `paper` por duas semanas para validar o fluxo, `telegram` por
 3. `pip install MetaTrader5` e defina `MT5_LOGIN` e `MT5_PASSWORD`. Ajuste `mt5.server` e `mt5.terminal_path` no config.
 4. Teste: `python run_weekly.py --mode mt5` com `dry_run: true`.
 
+Com `dry_run: false`, o bot só envia ordens entre 10:05 e 16:50 (Brasília) em dia útil e para sem registrar nada fora desse horário. Ordens a mercado com o pregão fechado são rejeitadas. Quantidades são divididas em lote padrão (múltiplos de 100) e fracionário (resto, ticker + F). Na venda, o bot lê a posição real de cada símbolo no MT5. A carteira registrada guarda só o que a corretora confirmou; ordens rejeitadas aparecem na mensagem como não executadas.
+
 Limitações conhecidas da XP: o MT5 é unicast, então posições abertas pelo home broker não aparecem nele. Mantenha a cesta inteira dentro do MT5 e não misture com operações manuais na mesma conta, ou use a sub-conta demo para o teste. O fracionário no MT5 pode exigir habilitação; se `PETR4F` não aparecer no Observatório de Mercado, peça à XP ou suba `capital_per_position` para cobrir lotes de 100.
 
 ## Agendamento no VPS Windows
 
-Agendador de Tarefas: criar tarefa semanal, sexta 18:30, ação `python C:\cesta-bot\run_weekly.py`, "Iniciar em" `C:\cesta-bot`. Marque "Executar estando o usuário conectado ou não" para o MT5 abrir em sessão.
+Agendador de Tarefas: criar tarefa semanal, segunda 10:15, ação `python C:\cesta-bot\run_weekly.py`, "Iniciar em" `C:\cesta-bot`. Marque "Executar estando o usuário conectado ou não" para o MT5 abrir em sessão. Às 10:15 a barra de segunda ainda é parcial e é descartada, então o sinal usa o fechamento de sexta, como no backtest. Se a segunda for feriado, rode na terça.
 
-Para só sinais (sem MT5), `run_weekly.py --mode telegram` roda em qualquer Linux barato ou no GitHub Actions com `cron: "30 21 * * 5"` e os dois segredos do Telegram.
+Para só sinais (sem MT5), `run_weekly.py --mode telegram` roda sexta após as 18h em qualquer Linux barato ou no GitHub Actions com `cron: "30 21 * * 5"` e os dois segredos do Telegram. No GitHub Actions o container é descartado a cada execução: o workflow precisa fazer commit de `state/portfolio.json` (ou guardá-lo como artefato) ou a carteira recomeça vazia toda semana.
+
+A rodada se recusa a processar duas vezes os mesmos dados de preço, porque isso contaria uma semana extra de posse. Use `--force` para repetir de propósito.
 
 ## Estrutura
 
 ```
 config.yaml      universo, parâmetros, custos, modo
-data.py          preços (Yahoo), Selic/CDI (BCB), fundamentos (yfinance)
+data.py          preços (Yahoo), CDI (BCB), fundamentos (yfinance)
 strategy.py      regras de entrada, saída e regime
 backtest.py      simulação semanal com custos
 run_weekly.py    rodada ao vivo
@@ -72,4 +88,4 @@ output/          resultados do backtest
 
 ## Aviso
 
-Nada aqui é recomendação de investimento. Momentum funciona em média e falha em reversões bruscas, com drawdowns de 30% ou mais em anos como 2015, 2020 e 2021. O stop móvel limita perdas por ativo, não da cesta. Use capital que pode perder durante o teste.
+Nada aqui é recomendação de investimento. Momentum funciona em média e falha em reversões bruscas, com drawdowns de 30% ou mais em anos como 2015, 2020 e 2021. O regime trocou 54 vezes em 618 semanas de 2015 a 2026, muitas vezes ida e volta em semanas seguidas, e cada troca com `resize_on_regime: true` gira a carteira inteira. O stop móvel é verificado só no fechamento semanal, então a perda por ativo pode passar de 12%. Ele limita perdas por ativo, não da cesta. Use capital que pode perder durante o teste.

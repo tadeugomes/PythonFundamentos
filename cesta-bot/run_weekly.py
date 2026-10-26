@@ -1,6 +1,7 @@
 """Rodada semanal: baixa dados, decide, executa (paper/telegram/mt5) e notifica.
 
-Agende para sexta-feira após 18h ou segunda antes da abertura.
+Sinais (paper/telegram): agende para sexta-feira após 18h.
+Ordens (mt5): agende para segunda entre 10:05 e 16:50; o sinal usa o fechamento de sexta.
   python run_weekly.py               # usa execution.mode do config
   python run_weekly.py --mode paper  # força modo
 """
@@ -34,8 +35,17 @@ def to_positions(raw: dict) -> dict[str, Position]:
     return {t: Position(**{k: v for k, v in h.items() if k in Position.__dataclass_fields__}) for t, h in raw.items()}
 
 
-def fmt_message(d, px, holdings, cfg, mode: str, executed: list) -> str:
-    lines = [f"<b>Cesta semanal</b> · {date.today():%d/%m/%Y} · modo {mode}"]
+def filled(orders: list) -> tuple[float, float | None]:
+    """Quantidade executada e preço médio. Em dry-run conta a quantidade simulada."""
+    done = [o for o in orders if o.sent or o.comment == "dry-run"]
+    qty = sum(o.qty for o in done)
+    priced = [o for o in done if o.price > 0]
+    avg = sum(o.qty * o.price for o in priced) / sum(o.qty for o in priced) if priced else None
+    return qty, avg
+
+
+def fmt_message(d, px, holdings, cfg, mode: str, executed: list, resized: dict, not_filled: list) -> str:
+    lines = [f"<b>Cesta semanal</b> · {date.today():%d/%m/%Y} · modo {mode} · dados de {px.name:%d/%m}"]
     lines.append(f"Exposição alvo: {d.exposure:.0%}" + ("  (regime desfavorável)" if d.exposure < 1 else ""))
     if d.sell:
         lines.append("\n<b>VENDER</b>")
@@ -46,6 +56,10 @@ def fmt_message(d, px, holdings, cfg, mode: str, executed: list) -> str:
         lines.append("\n<b>COMPRAR</b>")
         for t in d.buy:
             lines.append(f"• {t} @ R$ {px[t]:.2f}  {d.reasons.get(t,'')}")
+    if resized:
+        lines.append(f"\n<b>AJUSTAR</b> (regime mudou para {d.exposure:.0%})")
+        for t, dq in resized.items():
+            lines.append(f"• {t} {'+' if dq > 0 else ''}{dq:.2f} ações")
     if d.hold:
         lines.append("\n<b>MANTER</b> " + ", ".join(
             f"{t} ({px[t]/holdings[t].entry_price-1:+.1%})" for t in d.hold))
@@ -53,6 +67,8 @@ def fmt_message(d, px, holdings, cfg, mode: str, executed: list) -> str:
         lines.append("\n<b>Ordens</b>")
         for o in executed:
             lines.append(f"• {o.side} {o.qty} {o.symbol} @ {o.price:.2f} {'enviada' if o.sent else '(não enviada)'}")
+    if not_filled:
+        lines.append("\n<b>Não executadas</b> (carteira registrada não mudou): " + ", ".join(not_filled))
     if d.scores is not None and len(d.scores):
         top = d.scores.head(10)
         lines.append("\nTop momentum: " + ", ".join(f"{t} {v:+.0%}" for t, v in top.items()))
@@ -63,23 +79,45 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["paper", "telegram", "mt5"])
     ap.add_argument("--no-fundamentals", action="store_true")
+    ap.add_argument("--force", action="store_true", help="roda mesmo se a carteira já usou estes dados")
     args = ap.parse_args()
     cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
     ex = cfg["execution"]
     mode = args.mode or ex["mode"]
+    dry_run, frac = ex["dry_run"], ex["use_fractional"]
     state_path = Path(ex["state_file"])
     state = load_state(state_path)
     holdings = to_positions(state["holdings"])
+    prev_exposure = state.get("exposure")
+
+    if mode == "mt5" and not dry_run:
+        import broker_mt5 as br
+        if not br.market_is_open():
+            raise SystemExit(f"pregão fechado: ordens a mercado só entre {br.SESSION_START:%H:%M} e "
+                             f"{br.SESSION_END:%H:%M} em dia útil. Nada foi enviado nem registrado.")
 
     start = (pd.Timestamp.today() - pd.DateOffset(months=18)).strftime("%Y-%m-%d")
     tickers = cfg["universe"]
-    prices = load_prices(tickers + [cfg["benchmark"]], start, refresh=True)
+    # sem cache: a janela de 18 meses não pode sobrescrever o histórico longo do backtest
+    prices = load_prices(tickers + [cfg["benchmark"]], start, refresh=True, cache=False)
     bench = prices[cfg["benchmark"]].dropna()
     prices = prices[tickers]
+    asof = str(prices.index[-1].date())
+    if state.get("prices_asof") == asof and not args.force:
+        # repetir a rodada contaria mais uma semana de posse e duplicaria o histórico
+        raise SystemExit(f"carteira já processada com dados de {asof}. Use --force para rodar de novo.")
     fund = None if args.no_fundamentals else load_fundamentals(tickers)
 
     d = decide(prices, bench, holdings, cfg, fund)
     px = prices.iloc[-1]
+    cap = ex["capital_per_position"] * d.exposure
+    resize = (cfg["strategy"].get("resize_on_regime", True)
+              and prev_exposure is not None and d.exposure != prev_exposure)
+
+    # quantidades executadas por ticker; paper usa frações, mt5 usa o que a corretora confirmou
+    sold: dict[str, float] = {}
+    resized: dict[str, float] = {}
+    bought: dict[str, tuple[float, float]] = {}
     executed = []
 
     if mode == "mt5":
@@ -87,36 +125,76 @@ def main():
         br.connect(cfg)
         try:
             for t in d.sell:
-                qty = int(holdings[t].qty)
-                sym, q = br._symbol_for(t, qty, ex["use_fractional"])
-                executed.append(br.market_order(sym, "SELL", q, dry_run=ex["dry_run"]))
+                orders = br.sell(t, None, frac, dry_run, fallback_qty=int(holdings[t].qty))
+                executed += orders
+                sold[t] = min(filled(orders)[0], holdings[t].qty)
+            if resize:
+                for t in d.hold:
+                    price = br.last_price(t) or px[t]
+                    delta = br.quantity_for(cap, price) - int(holdings[t].qty)
+                    if delta < 0:
+                        orders = br.sell(t, -delta, frac, dry_run, fallback_qty=int(holdings[t].qty))
+                        resized[t] = -filled(orders)[0]
+                    elif delta > 0:
+                        orders = br.buy(t, delta, frac, dry_run)
+                        resized[t] = filled(orders)[0]
+                    else:
+                        continue
+                    executed += orders
             for t in d.buy:
                 price = br.last_price(t) or px[t]
-                sym, q = br.quantity_for(t, ex["capital_per_position"] * d.exposure, price, ex["use_fractional"])
-                executed.append(br.market_order(sym, "BUY", q, dry_run=ex["dry_run"]))
+                orders = br.buy(t, br.quantity_for(cap, price), frac, dry_run)
+                executed += orders
+                qty, avg = filled(orders)
+                bought[t] = (qty, avg or float(px[t]))
         finally:
             br.shutdown()
+    else:
+        sold = {t: holdings[t].qty for t in d.sell}
+        if resize:
+            resized = {t: cap / px[t] - holdings[t].qty for t in d.hold}
+        bought = {t: (cap / px[t], float(px[t])) for t in d.buy}
 
-    holdings_before = dict(holdings)
+    holdings_before = {t: Position(**h.__dict__) for t, h in holdings.items()}
+    not_filled = []
     # atualiza carteira registrada (paper e real usam o mesmo estado)
     for t in d.sell:
-        h = holdings.pop(t)
-        state["history"].append({"date": str(date.today()), "ticker": t, "side": "SELL",
+        h = holdings[t]
+        q = sold.get(t, 0)
+        if q <= 0:
+            not_filled.append(f"venda {t}")
+            continue
+        h.qty -= q
+        state["history"].append({"date": str(date.today()), "ticker": t, "side": "SELL", "qty": float(q),
                                  "price": float(px[t]), "ret": float(px[t] / h.entry_price - 1),
                                  "reason": d.reasons.get(t)})
+        if h.qty < 1e-9:
+            holdings.pop(t)
+        else:
+            not_filled.append(f"venda parcial {t} (restam {h.qty:g})")
+    for t, dq in resized.items():
+        holdings[t].qty += dq
+        state["history"].append({"date": str(date.today()), "ticker": t, "side": "ADD" if dq > 0 else "TRIM",
+                                 "qty": float(abs(dq)), "price": float(px[t]),
+                                 "reason": f"regime {d.exposure:.0%}"})
     for t in d.buy:
-        qty = (ex["capital_per_position"] * d.exposure) / px[t]
-        holdings[t] = Position(entry_price=float(px[t]), peak=float(px[t]), qty=float(qty))
-        state["history"].append({"date": str(date.today()), "ticker": t, "side": "BUY",
-                                 "price": float(px[t]), "reason": d.reasons.get(t)})
+        qty, price = bought.get(t, (0, None))
+        if qty <= 0:
+            not_filled.append(f"compra {t}")
+            continue
+        holdings[t] = Position(entry_price=float(price), peak=float(price), qty=float(qty))
+        state["history"].append({"date": str(date.today()), "ticker": t, "side": "BUY", "qty": float(qty),
+                                 "price": float(price), "reason": d.reasons.get(t)})
     for h in holdings.values():
         h.weeks_held += 1
     state["holdings"] = {t: h.__dict__ for t, h in holdings.items()}
+    state["exposure"] = d.exposure
     state["last_run"] = str(date.today())
+    state["prices_asof"] = asof
     state["equity_paper"] = float(sum(h.qty * px[t] for t, h in holdings.items()))
     save_state(state_path, state)
 
-    msg = fmt_message(d, px, holdings_before, cfg, mode, executed)
+    msg = fmt_message(d, px, holdings_before, cfg, mode, executed, resized, not_filled)
     print(msg.replace("<b>", "").replace("</b>", ""))
     if mode in ("telegram", "mt5"):
         send_telegram(msg, cfg)
