@@ -1,5 +1,8 @@
 """Rodada semanal: baixa dados, decide, executa (paper/telegram/mt5) e notifica.
 
+Com strategy.check ou strategy.refill em "daily", agende todo dia útil: a sexta faz a
+decisão completa e os outros dias só checam saídas e/ou preenchem vagas abertas.
+
 Sinais (paper/telegram): agende para sexta-feira após 18h.
 Ordens (mt5): agende para segunda entre 10:05 e 16:50; o sinal usa o fechamento de sexta.
   python run_weekly.py               # usa execution.mode do config
@@ -44,8 +47,10 @@ def filled(orders: list) -> tuple[float, float | None]:
     return qty, avg
 
 
-def fmt_message(d, px, holdings, cfg, mode: str, executed: list, resized: dict, not_filled: list) -> str:
-    lines = [f"<b>Cesta semanal</b> · {date.today():%d/%m/%Y} · modo {mode} · dados de {px.name:%d/%m}"]
+def fmt_message(d, px, holdings, cfg, mode: str, executed: list, resized: dict, not_filled: list,
+                weekly: bool = True) -> str:
+    title = "Cesta semanal" if weekly else "Cesta · checagem diária"
+    lines = [f"<b>{title}</b> · {date.today():%d/%m/%Y} · modo {mode} · dados de {px.name:%d/%m}"]
     lines.append(f"Exposição alvo: {d.exposure:.0%}" + ("  (regime desfavorável)" if d.exposure < 1 else ""))
     if d.sell:
         lines.append("\n<b>VENDER</b>")
@@ -108,10 +113,26 @@ def main():
         raise SystemExit(f"carteira já processada com dados de {asof}. Use --force para rodar de novo.")
     fund = None if args.no_fundamentals else load_fundamentals(tickers)
 
-    d = decide(prices, bench, holdings, cfg, fund)
+    st = cfg["strategy"]
+    daily_check = st.get("check", "weekly") == "daily"
+    daily_refill = st.get("refill", "weekly") == "daily"
+    asof_ts = prices.index[-1]
+    last_weekly = state.get("last_weekly")
+    # com checagem diária, a decisão completa (ranking, regime, ajuste) só roda na sexta;
+    # se a sexta foi feriado, roda no primeiro pregão depois de 7 dias sem decisão completa
+    weekly = (not (daily_check or daily_refill) or asof_ts.weekday() == 4 or last_weekly is None
+              or (asof_ts - pd.Timestamp(last_weekly)).days >= 7)
+    if weekly:
+        d = decide(prices, bench, holdings, cfg, fund)
+    else:
+        d = decide(prices, bench, holdings, cfg, fund, exits=daily_check, rank_exit=False)
+        if prev_exposure is not None:
+            d.exposure = prev_exposure  # regime só muda na decisão semanal
+        if not daily_refill:
+            d.buy = []
     px = prices.iloc[-1]
     cap = ex["capital_per_position"] * d.exposure
-    resize = (cfg["strategy"].get("resize_on_regime", True)
+    resize = (weekly and st.get("resize_on_regime", True)
               and prev_exposure is not None and d.exposure != prev_exposure)
 
     # quantidades executadas por ticker; paper usa frações, mt5 usa o que a corretora confirmou
@@ -185,8 +206,10 @@ def main():
         holdings[t] = Position(entry_price=float(price), peak=float(price), qty=float(qty))
         state["history"].append({"date": str(date.today()), "ticker": t, "side": "BUY", "qty": float(qty),
                                  "price": float(price), "reason": d.reasons.get(t)})
-    for h in holdings.values():
-        h.weeks_held += 1
+    if weekly:
+        for h in holdings.values():
+            h.weeks_held += 1
+        state["last_weekly"] = asof
     state["holdings"] = {t: h.__dict__ for t, h in holdings.items()}
     state["exposure"] = d.exposure
     state["last_run"] = str(date.today())
@@ -194,7 +217,7 @@ def main():
     state["equity_paper"] = float(sum(h.qty * px[t] for t, h in holdings.items()))
     save_state(state_path, state)
 
-    msg = fmt_message(d, px, holdings_before, cfg, mode, executed, resized, not_filled)
+    msg = fmt_message(d, px, holdings_before, cfg, mode, executed, resized, not_filled, weekly)
     print(msg.replace("<b>", "").replace("</b>", ""))
     if mode in ("telegram", "mt5"):
         send_telegram(msg, cfg)

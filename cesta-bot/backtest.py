@@ -1,7 +1,8 @@
 """Backtest semanal da cesta contra Ibovespa e CDI, com custos.
 
-Uso:  python backtest.py [--start 2015-01-01] [--refresh] [--execution close|next_open]
-                         [--no-cash-yield] [--no-resize]
+Uso:  python backtest.py [--start 5y|2015-01-01] [--refresh] [--execution close|next_open]
+                         [--no-cash-yield] [--no-resize] [--check weekly|daily]
+                         [--refill weekly|daily] [--stop-type close|intraday] [--trailing-stop 0.12]
 Saída: relatório no terminal e output/backtest.csv / output/backtest.png
 
 O sinal usa o fechamento de sexta. Por padrão as ordens são executadas na abertura
@@ -23,62 +24,59 @@ from strategy import Position, decide
 def run(
     close: pd.DataFrame,
     open_: pd.DataFrame,
+    low: pd.DataFrame,
     bench: pd.Series,
     cfg: dict,
     start: str,
     cdi: pd.Series | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Simula dia a dia. Sexta: decisão completa. Outros dias: conforme `strategy.check`,
+    `strategy.refill` e `strategy.stop_type`. Decisões no fechamento, execução na abertura seguinte."""
     c = cfg["costs"]
     bt = cfg["backtest"]
+    st = cfg["strategy"]
     cost = c["commission"] + c["b3_fees"] + c["slippage"]
     next_open = bt.get("execution", "next_open") == "next_open"
-    resize = cfg["strategy"].get("resize_on_regime", True)
-    target_n = cfg["strategy"]["n_positions"]
+    resize = st.get("resize_on_regime", True)
+    daily_check = st.get("check", "weekly") == "daily"
+    daily_refill = st.get("refill", "weekly") == "daily"
+    intraday = st.get("stop_type", "close") == "intraday"
+    target_n = st["n_positions"]
+    stop = st["trailing_stop"]
     cash = float(bt["initial_capital"])
     holdings: dict[str, Position] = {}
     days = close.index
     close_ff = close.ffill()  # marcação a mercado de ativos sem negócio no dia
     fridays = close.loc[start:].resample("W-FRI").last().index
     signal_days = sorted({days.asof(f) for f in fridays})
+    weekly_set = set(signal_days)
+    sim_days = days[days >= signal_days[0]]
     rows, trades = [], []
-    prev_day, prev_exposure = None, None
+    state = {"cash": cash, "prev_exposure": None}
+    exposure = 1.0
+    pending = None  # (decisão, é semanal) a executar no próximo pregão
+    prev_day = None
 
-    for s in signal_days:
-        if cdi is not None and prev_day is not None:
-            cash *= float((1 + cdi.loc[prev_day + pd.Timedelta(days=1):s]).prod())
-        prev_day = s
+    def trade(day, t, side, qty, price, reason, ret=np.nan):
+        trades.append({"date": day, "ticker": t, "side": side, "price": price, "qty": qty,
+                       "ret": ret, "reason": reason})
 
-        px_close = close.loc[s]
-        equity_close = cash + sum(p.qty * close_ff.at[s, t] for t, p in holdings.items())
-        d = decide(close.loc[:s], bench.loc[:s], holdings, cfg)
-        rows.append({"date": s, "equity": equity_close, "cash": cash, "n": len(holdings), "exposure": d.exposure})
-
-        i = days.get_loc(s)
-        if next_open:
-            if i + 1 >= len(days):
-                break  # sem pregão seguinte para executar
-            e = days[i + 1]
-            px = open_.loc[e].fillna(close.loc[e])
-        else:
-            e, px = s, px_close
-
-        def trade(t, side, qty, reason, ret=np.nan):
-            trades.append({"date": e, "ticker": t, "side": side, "price": px[t], "qty": qty,
-                           "ret": ret, "reason": reason})
-
+    def execute(d, px, day, weekly):
+        cash = state["cash"]
         for t in d.sell:
-            if pd.isna(px.get(t)):  # sem negócio no dia da execução: vende na próxima semana
-                d.hold.append(t)
+            if t not in holdings:
+                continue  # já saiu por stop no pregão
+            if pd.isna(px.get(t)):  # sem negócio no dia da execução: tenta de novo depois
                 continue
             pos = holdings.pop(t)
             cash += pos.qty * px[t] * (1 - cost)
-            trade(t, "SELL", pos.qty, d.reasons.get(t), px[t] / pos.entry_price - 1)
+            trade(day, t, "SELL", pos.qty, px[t], d.reasons.get(t), px[t] / pos.entry_price - 1)
 
         equity_now = cash + sum(p.qty * px[t] for t, p in holdings.items() if not pd.isna(px[t]))
         per_pos = equity_now * d.exposure / target_n
 
         # mudança de regime: leva as posições mantidas ao novo tamanho alvo
-        if resize and prev_exposure is not None and d.exposure != prev_exposure:
+        if weekly and resize and state["prev_exposure"] is not None and d.exposure != state["prev_exposure"]:
             for t, pos in holdings.items():
                 if pd.isna(px[t]):
                     continue
@@ -86,27 +84,74 @@ def run(
                 if delta < 0:
                     cash += -delta * px[t] * (1 - cost)
                     pos.qty += delta
-                    trade(t, "TRIM", -delta, f"regime {d.exposure:.0%}")
+                    trade(day, t, "TRIM", -delta, px[t], f"regime {d.exposure:.0%}")
                 elif delta > 0 and cash > 0:
                     amount = min(delta * px[t], cash)
                     pos.qty += amount * (1 - cost) / px[t]
                     cash -= amount
-                    trade(t, "ADD", amount / px[t], f"regime {d.exposure:.0%}")
-        prev_exposure = d.exposure
+                    trade(day, t, "ADD", amount / px[t], px[t], f"regime {d.exposure:.0%}")
+        if weekly:
+            state["prev_exposure"] = d.exposure
 
         for t in d.buy:
-            if cash < per_pos * 0.5:
+            if len(holdings) >= target_n or cash < per_pos * 0.5:
                 break
-            if pd.isna(px.get(t)):
+            if t in holdings or pd.isna(px.get(t)):
                 continue
             amount = min(per_pos, cash)
             qty = amount * (1 - cost) / px[t]
             cash -= amount
             holdings[t] = Position(entry_price=px[t], peak=px[t], qty=qty)
-            trade(t, "BUY", qty, d.reasons.get(t))
+            trade(day, t, "BUY", qty, px[t], d.reasons.get(t))
 
-        for p in holdings.values():
-            p.weeks_held += 1
+        if weekly:
+            for p in holdings.values():
+                p.weeks_held += 1
+        state["cash"] = cash
+
+    for s in sim_days:
+        if cdi is not None and prev_day is not None:
+            state["cash"] *= float((1 + cdi.loc[prev_day + pd.Timedelta(days=1):s]).prod())
+        prev_day = s
+
+        if pending is not None:
+            d, weekly = pending
+            pending = None
+            execute(d, open_.loc[s].fillna(close.loc[s]), s, weekly)
+
+        if intraday:
+            # stop executado no pregão: na mínima que cruza o nível, ou na abertura se abrir abaixo
+            for t, pos in list(holdings.items()):
+                level = pos.peak * (1 - stop)
+                lo, op = low.at[s, t], open_.at[s, t]
+                if not pd.isna(lo) and lo <= level:
+                    fill = min(op, level) if not pd.isna(op) else level
+                    holdings.pop(t)
+                    state["cash"] += pos.qty * fill * (1 - cost)
+                    trade(s, t, "SELL", pos.qty, fill, "stop no pregão", fill / pos.entry_price - 1)
+            for t, pos in holdings.items():
+                if not pd.isna(close.at[s, t]):
+                    pos.peak = max(pos.peak, close.at[s, t])
+
+        if s in weekly_set:
+            equity = state["cash"] + sum(p.qty * close_ff.at[s, t] for t, p in holdings.items())
+            d = decide(close.loc[:s], bench.loc[:s], holdings, cfg)
+            exposure = d.exposure
+            rows.append({"date": s, "equity": equity, "cash": state["cash"], "n": len(holdings),
+                         "exposure": d.exposure})
+            pending = (d, True)
+        elif daily_check or daily_refill:
+            d = decide(close.loc[:s], bench.loc[:s], holdings, cfg, exits=daily_check, rank_exit=False)
+            d.exposure = exposure  # regime só muda na sexta
+            if not daily_refill:
+                d.buy = []
+            if d.sell or d.buy:
+                pending = (d, False)
+
+        if pending is not None and not next_open:
+            d, weekly = pending
+            pending = None
+            execute(d, close.loc[s], s, weekly)
 
     curve = pd.DataFrame(rows).set_index("date")
     return curve, pd.DataFrame(trades)
@@ -122,6 +167,14 @@ def metrics(series: pd.Series, rf_weekly: pd.Series | None = None) -> dict:
     return {"CAGR": cagr, "MaxDD": dd, "Sharpe": sharpe, "Total": series.iloc[-1] / series.iloc[0] - 1}
 
 
+def parse_start(value: str) -> str:
+    """Aceita data (2015-01-01) ou janela relativa a hoje (5y = últimos 5 anos)."""
+    value = str(value)
+    if value.endswith("y") and value[:-1].isdigit():
+        return (pd.Timestamp.today().normalize() - pd.DateOffset(years=int(value[:-1]))).strftime("%Y-%m-%d")
+    return value
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default=None)
@@ -129,6 +182,10 @@ def main():
     ap.add_argument("--execution", choices=["close", "next_open"], default=None)
     ap.add_argument("--no-cash-yield", action="store_true", help="caixa parado não rende CDI")
     ap.add_argument("--no-resize", action="store_true", help="regime só afeta compras novas")
+    ap.add_argument("--check", choices=["weekly", "daily"], default=None, help="frequência das saídas")
+    ap.add_argument("--refill", choices=["weekly", "daily"], default=None, help="frequência de reposição de vagas")
+    ap.add_argument("--stop-type", choices=["close", "intraday"], default=None)
+    ap.add_argument("--trailing-stop", type=float, default=None)
     ap.add_argument("--out", default="output")
     args = ap.parse_args()
     cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
@@ -136,13 +193,18 @@ def main():
         cfg["backtest"]["execution"] = args.execution
     if args.no_resize:
         cfg["strategy"]["resize_on_regime"] = False
-    start = args.start or cfg["backtest"]["start"]
+    for key, val in [("check", args.check), ("refill", args.refill), ("stop_type", args.stop_type),
+                     ("trailing_stop", args.trailing_stop)]:
+        if val is not None:
+            cfg["strategy"][key] = val
+    start = parse_start(args.start or cfg["backtest"]["start"])
     warmup = (pd.Timestamp(start) - pd.DateOffset(months=15)).strftime("%Y-%m-%d")
 
     tickers = cfg["universe"]
-    close, open_ = load_prices(tickers + [cfg["benchmark"]], warmup, refresh=args.refresh, with_open=True)
+    close, open_, low = load_prices(tickers + [cfg["benchmark"]], warmup, refresh=args.refresh,
+                                    extra=("Open", "Low"))
     bench = close[cfg["benchmark"]].dropna()
-    close, open_ = close[tickers], open_[tickers]
+    close, open_, low = close[tickers], open_[tickers], low[tickers]
 
     try:
         cdi = load_cdi_daily(warmup)
@@ -151,7 +213,7 @@ def main():
         cdi = None
     use_yield = cfg["backtest"].get("cash_yield", True) and not args.no_cash_yield
 
-    curve, trades = run(close, open_, bench, cfg, start, cdi if use_yield else None)
+    curve, trades = run(close, open_, low, bench, cfg, start, cdi if use_yield else None)
     bench_w = bench.reindex(curve.index, method="ffill")
     bench_w = bench_w / bench_w.iloc[0] * curve["equity"].iloc[0]
     if cdi is not None:
@@ -170,6 +232,9 @@ def main():
     first = close.loc[start:].iloc[0]
     print(f"Universo: {int(first.notna().sum())} de {len(tickers)} ativos com cotação em {first.name.date()} "
           "(lista atual do índice: há viés de sobrevivência)")
+    st = cfg["strategy"]
+    print(f"Saídas: {st.get('check', 'weekly')}  |  reposição: {st.get('refill', 'weekly')}  |  stop: "
+          f"{st.get('stop_type', 'close')} {st['trailing_stop']:.0%}")
     print(f"Execução: {cfg['backtest'].get('execution', 'next_open')}  |  caixa rende CDI: "
           f"{'sim' if use_yield and cdi is not None else 'não'}  |  ajuste no regime: "
           f"{'sim' if cfg['strategy'].get('resize_on_regime', True) else 'não'}")

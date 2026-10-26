@@ -13,6 +13,7 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 B3_TZ = "America/Sao_Paulo"
 B3_DATA_READY_HOUR = 18  # depois do leilão de fechamento
+FIELDS = ("Close", "Open", "Low")
 
 
 def _yf_symbol(ticker: str) -> str:
@@ -31,12 +32,13 @@ def _download(tickers: list[str], start: str) -> dict[str, pd.DataFrame]:
     symbols = [_yf_symbol(t) for t in tickers]
     raw = yf.download(symbols, start=start, auto_adjust=True, progress=False, group_by="column")
     out = {}
-    for field in ("Close", "Open"):
+    for field in FIELDS:
         df = raw[field].copy()
         df.columns = [c.replace(".SA", "") for c in df.columns]
         out[field] = df.sort_index().reindex(columns=tickers)
     out["Close"] = out["Close"].dropna(how="all")
-    out["Open"] = out["Open"].reindex(out["Close"].index)
+    for field in FIELDS[1:]:
+        out[field] = out[field].reindex(out["Close"].index)
     return out
 
 
@@ -53,14 +55,14 @@ def load_prices(
     start: str,
     refresh: bool = False,
     cache: bool = True,
-    with_open: bool = False,
-) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    extra: tuple[str, ...] = (),
+) -> pd.DataFrame | tuple[pd.DataFrame, ...]:
     """Preços ajustados, uma coluna por ticker (sem sufixo .SA).
 
-    Devolve o fechamento, ou (fechamento, abertura) com `with_open=True`.
+    Devolve o fechamento, ou (fechamento, *extra) com `extra=("Open", "Low")`.
     `cache=False` baixa sem ler nem gravar o cache (uso ao vivo).
     """
-    paths = {"Close": CACHE_DIR / "prices_close.parquet", "Open": CACHE_DIR / "prices_open.parquet"}
+    paths = {f: CACHE_DIR / f"prices_{f.lower()}.parquet" for f in FIELDS}
     data = None
     if cache and not refresh and all(p.exists() for p in paths.values()):
         cached = {f: pd.read_parquet(p) for f, p in paths.items()}
@@ -76,8 +78,8 @@ def load_prices(
     empty = [t for t in tickers if close[t].isna().all()]
     if empty:
         print(f"[dados] sem cotação no Yahoo (ticker mudou ou saiu da bolsa?): {', '.join(empty)}")
-    if with_open:
-        return close, data["Open"].reindex(close.index)
+    if extra:
+        return (close, *(data[f].reindex(close.index) for f in extra))
     return close
 
 

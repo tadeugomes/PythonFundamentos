@@ -22,12 +22,36 @@ Se a rodada acontecer antes das 18h de um dia de pregão, a barra do dia é desc
 
 ```bash
 pip install -r requirements.txt
-python backtest.py            # ~2 min na primeira vez (baixa desde 2013)
+python backtest.py            # últimos 5 anos (backtest.start: "5y")
 ```
 
-Saída em `output/backtest.csv`, `output/trades.csv` e `output/backtest.png`. Rode variações: `python backtest.py --start 2020-01-01`. Para medir o efeito de cada premissa: `--execution close`, `--no-cash-yield`, `--no-resize` e `--out output/variante`. Mude parâmetros em `config.yaml` e compare. Desconfie de qualquer combinação que só funciona com um conjunto estreito de valores.
+Saída em `output/backtest.csv`, `output/trades.csv` e `output/backtest.png`. Rode variações: `python backtest.py --start 2015-01-01` (aceita data ou `Ny`). Para medir o efeito de cada premissa: `--execution close`, `--no-cash-yield`, `--no-resize` e `--out output/variante`. Mude parâmetros em `config.yaml` e compare. Desconfie de qualquer combinação que só funciona com um conjunto estreito de valores.
 
 O cache de preços (`cache/prices_close.parquet` e `cache/prices_open.parquet`) só é usado se cobrir a data de início pedida. A rodada semanal baixa os dados sem ler nem gravar esse cache.
+
+### Checagem diária
+
+Por padrão tudo acontece na sexta. Três opções em `strategy` mudam isso:
+
+- `check: daily` checa stop móvel e SMA50 em todo pregão. Sair do top momentum continua sendo critério só da sexta.
+- `refill: daily` preenche no dia seguinte as vagas abertas por uma saída, sem esperar a sexta.
+- `stop_type: intraday` simula uma ordem stop no pregão, executada no nível do stop ou na abertura se o papel abrir abaixo dele. Só existe no backtest.
+
+Em todos os casos, ranking, regime e ajuste de exposição continuam semanais. Com `check` ou `refill` diários, a rodada ao vivo deve ser agendada para todo dia útil.
+
+Teste feito em 26/10/2026 (CAGR, drawdown máximo, Sharpe sobre o CDI):
+
+| variante | últimos 5 anos | desde 2015 |
+|---|---|---|
+| semanal (padrão) | 4,0% / -16,9% / -0,38 | 14,1% / -23,9% / 0,29 |
+| `check: daily` | 5,4% / -14,6% / -0,34 | 14,0% / -22,9% / 0,30 |
+| `check` e `refill: daily` | 6,1% / -19,4% / -0,29 | 16,2% / -19,4% / 0,39 |
+| semanal + `stop_type: intraday` | 4,5% / -21,4% / -0,35 | 14,2% / -22,8% / 0,30 |
+| `check: daily` + `intraday` | 4,6% / -18,2% / -0,37 | 12,2% / -25,8% / 0,20 |
+| Ibovespa | 11,3% / -20,6% | 11,6% / -43,4% |
+| CDI | 12,7% | 10,0% |
+
+A reposição diária ficou cerca de 2 pontos ao ano acima da versão semanal nas duas janelas e com stops de 10% a 20%, mas ganhou em só 6 de 12 anos. O stop no pregão não melhorou nenhuma variante. Nos últimos 5 anos nenhuma variante superou o Ibovespa ou o CDI.
 
 ### Viés de sobrevivência
 

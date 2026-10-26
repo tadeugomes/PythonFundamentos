@@ -67,8 +67,15 @@ def decide(
     holdings: dict[str, Position],
     cfg: dict,
     fund: pd.DataFrame | None = None,
+    exits: bool = True,
+    rank_exit: bool = True,
 ) -> Decision:
-    """Decisão semanal com base nos dados até a última linha de `prices`."""
+    """Decisão com base nos dados até a última linha de `prices`.
+
+    Na sexta roda completa. Nos outros dias (checagem diária) usa `rank_exit=False`,
+    porque sair do top momentum é critério de reavaliação semanal, ou `exits=False`
+    para só preencher vagas abertas.
+    """
     s = cfg["strategy"]
     n = s["n_positions"]
     need = max(s["momentum_lookback"] + s["momentum_skip"], s["trend_sma"], s["vol_lookback"]) + 5
@@ -88,6 +95,9 @@ def decide(
     d = Decision(exposure=regime_exposure(bench, s["regime_sma"], s["regime_exposure"]), scores=ranked)
 
     for t, pos in holdings.items():
+        if not exits:
+            d.hold.append(t)
+            continue
         price = last.get(t)
         if price is None or pd.isna(price):
             d.sell.append(t); d.reasons[t] = "sem cotação"; continue
@@ -96,7 +106,7 @@ def decide(
             d.sell.append(t); d.reasons[t] = f"stop móvel ({price / pos.peak - 1:+.1%} do pico)"
         elif pos.weeks_held >= s["min_hold_weeks"] and price < sma[t]:
             d.sell.append(t); d.reasons[t] = f"abaixo da SMA{s['trend_sma']}"
-        elif pos.weeks_held >= s["min_hold_weeks"] and t not in pool:
+        elif rank_exit and pos.weeks_held >= s["min_hold_weeks"] and t not in pool:
             d.sell.append(t); d.reasons[t] = "saiu do top momentum"
         else:
             d.hold.append(t)
