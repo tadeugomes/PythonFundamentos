@@ -96,6 +96,12 @@ Defina `execution.mode` em `config.yaml`:
 | `telegram` | carteira simulada + mensagem no Telegram |
 | `mt5` | envia ordens pelo MetaTrader 5 (com `dry_run: true` só simula) |
 
+Nos modos `paper` e `telegram`, a carteira simulada começa com `capital_per_position` x `n_positions` em caixa (R$ 4.000), paga os custos do config, e o caixa rende CDI entre as rodadas. O tamanho de cada compra acompanha o patrimônio simulado, como no backtest. Cada rodada grava patrimônio, caixa e Ibovespa em `runs` no arquivo da carteira, e a mensagem compara o resultado desde o início com o Ibovespa. `--state ARQUIVO` usa outro arquivo de carteira.
+
+### Paper agendado
+
+Desde 30/10/2026 uma tarefa agendada no Claude roda toda sexta às 18:31 (Brasília) `python run_weekly.py --mode telegram --state paper/portfolio.json` e faz commit de `paper/portfolio.json` na branch `ccr-e4ad9a00-scsx8s`. O resumo vai para o Telegram com as variáveis `TELEGRAM_TOKEN` e `TELEGRAM_CHAT_ID` do ambiente.
+
 Ordem recomendada: `paper` por duas semanas para validar o fluxo, `telegram` por dois ou três meses, depois `mt5` com `dry_run: true` por duas semanas, e só então `dry_run: false` com `capital_per_position` baixo (R$ 500 por ativo usa o mercado fracionário).
 
 ## Telegram

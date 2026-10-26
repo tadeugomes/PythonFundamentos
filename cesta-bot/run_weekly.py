@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from data import load_fundamentals, load_prices
+from data import load_cdi_daily, load_fundamentals, load_prices
 from notify import send_telegram
 from strategy import Position, decide
 
@@ -85,12 +85,13 @@ def main():
     ap.add_argument("--mode", choices=["paper", "telegram", "mt5"])
     ap.add_argument("--no-fundamentals", action="store_true")
     ap.add_argument("--force", action="store_true", help="roda mesmo se a carteira já usou estes dados")
+    ap.add_argument("--state", help="arquivo da carteira (padrão: execution.state_file)")
     args = ap.parse_args()
     cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
     ex = cfg["execution"]
     mode = args.mode or ex["mode"]
     dry_run, frac = ex["dry_run"], ex["use_fractional"]
-    state_path = Path(ex["state_file"])
+    state_path = Path(args.state or ex["state_file"])
     state = load_state(state_path)
     holdings = to_positions(state["holdings"])
     prev_exposure = state.get("exposure")
@@ -134,11 +135,12 @@ def main():
         if not daily_refill:
             d.buy = []
     px = prices.iloc[-1]
-    # capital_per_position vale para pesos iguais (1/n); com pesos por liquidez, escala pelo peso
     n_pos = st["n_positions"]
+    # mt5: capital fixo de capital_per_position x n_posições. paper: o patrimônio simulado, como no backtest
+    base = {"capital": ex["capital_per_position"] * n_pos}
 
     def cap(t):
-        return ex["capital_per_position"] * n_pos * d.weights.get(t, 1 / n_pos) * d.exposure
+        return base["capital"] * d.weights.get(t, 1 / n_pos) * d.exposure
     resize = (weekly and st.get("resize_on_regime", True)
               and prev_exposure is not None and d.exposure != prev_exposure)
 
@@ -178,10 +180,40 @@ def main():
         finally:
             br.shutdown()
     else:
-        sold = {t: holdings[t].qty for t in d.sell}
+        # carteira simulada com caixa: custos do config, caixa rende CDI entre as rodadas
+        cost = sum(cfg["costs"].values())
+        cash = state.get("cash")
+        if cash is None:
+            cash = base["capital"] - sum(h.qty * h.entry_price for h in holdings.values())
+            state.setdefault("start", {"date": asof, "equity": base["capital"], "ibov": float(bench.iloc[-1])})
+        prev_asof = state.get("prices_asof")
+        if prev_asof:
+            try:
+                cdi = load_cdi_daily(prev_asof)
+                cash *= float((1 + cdi.loc[pd.Timestamp(prev_asof) + pd.Timedelta(days=1):asof_ts]).prod())
+            except Exception as e:
+                print(f"[cdi] não foi possível render o caixa nesta rodada: {e}")
+        sold = {t: holdings[t].qty for t in d.sell if not pd.isna(px.get(t))}
+        cash += sum(q * px[t] * (1 - cost) for t, q in sold.items())
+        base["capital"] = cash + sum(h.qty * px[t] for t, h in holdings.items()
+                                     if t not in sold and not pd.isna(px[t]))
         if resize:
-            resized = {t: cap(t) / px[t] - holdings[t].qty for t in d.hold}
-        bought = {t: (cap(t) / px[t], float(px[t])) for t in d.buy}
+            for t in d.hold:
+                delta = cap(t) / px[t] - holdings[t].qty
+                if delta < 0:
+                    cash += -delta * px[t] * (1 - cost)
+                    resized[t] = delta
+                elif delta > 0 and cash > 0:
+                    amount = min(delta * px[t], cash)
+                    cash -= amount
+                    resized[t] = amount * (1 - cost) / px[t]
+        for t in d.buy:
+            amount = min(cap(t), cash)
+            if amount < 1:
+                continue
+            cash -= amount
+            bought[t] = (amount * (1 - cost) / px[t], float(px[t]))
+        state["cash"] = cash
 
     holdings_before = {t: Position(**h.__dict__) for t, h in holdings.items()}
     not_filled = []
@@ -221,10 +253,19 @@ def main():
     state["exposure"] = d.exposure
     state["last_run"] = str(date.today())
     state["prices_asof"] = asof
-    state["equity_paper"] = float(sum(h.qty * px[t] for t, h in holdings.items()))
+    equity = state.get("cash", 0.0) + float(sum(h.qty * px[t] for t, h in holdings.items()))
+    state["equity_paper"] = equity
+    if mode != "mt5":
+        state.setdefault("runs", []).append({"date": asof, "equity": round(equity, 2),
+                                             "cash": round(state["cash"], 2), "n": len(holdings),
+                                             "ibov": float(bench.iloc[-1])})
     save_state(state_path, state)
 
     msg = fmt_message(d, px, holdings_before, cfg, mode, executed, resized, not_filled, weekly)
+    if mode != "mt5" and "start" in state:
+        s0 = state["start"]
+        msg += (f"\n\nCarteira paper: R$ {equity:,.2f} ({equity / s0['equity'] - 1:+.1%} desde {s0['date']}) · "
+                f"caixa R$ {state['cash']:,.2f} · Ibovespa {bench.iloc[-1] / s0['ibov'] - 1:+.1%} no período")
     print(msg.replace("<b>", "").replace("</b>", ""))
     if mode in ("telegram", "mt5"):
         send_telegram(msg, cfg)
