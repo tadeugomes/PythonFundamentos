@@ -1,0 +1,95 @@
+# Configuração do bot de cesta semanal (B3 via XP/MetaTrader 5)
+
+universe:
+  # Ações líquidas do Ibovespa. Ajuste à vontade; sufixo .SA é adicionado pelo código.
+  - ABEV3
+  - ALOS3
+  - ASAI3
+  - AZZA3
+  - B3SA3
+  - BBAS3
+  - BBDC4
+  - BBSE3
+  - BPAC11
+  - BRAV3
+  - BRFS3
+  - CMIG4
+  - CPLE6
+  - CSAN3
+  - CSNA3
+  - CYRE3
+  - EGIE3
+  - ELET3
+  - EMBR3
+  - ENEV3
+  - EQTL3
+  - GGBR4
+  - HAPV3
+  - HYPE3
+  - ITSA4
+  - ITUB4
+  - KLBN11
+  - LREN3
+  - MGLU3
+  - MRVE3
+  - MULT3
+  - NTCO3
+  - PETR4
+  - PRIO3
+  - RADL3
+  - RAIL3
+  - RDOR3
+  - RENT3
+  - SANB11
+  - SBSP3
+  - SUZB3
+  - TAEE11
+  - TIMS3
+  - TOTS3
+  - UGPA3
+  - USIM5
+  - VALE3
+  - VBBR3
+  - VIVT3
+  - WEGE3
+
+benchmark: "^BVSP"
+
+strategy:
+  n_positions: 8            # tamanho da cesta
+  momentum_lookback: 252    # 12 meses em pregões
+  momentum_skip: 21         # ignora o último mês (reversão de curto prazo)
+  trend_sma: 50             # só entra acima da média de 50 dias
+  trailing_stop: 0.12       # sai se cair 12% do pico desde a entrada
+  min_hold_weeks: 2         # evita giro excessivo
+  regime_sma: 200           # IBOV abaixo da SMA200 => reduz exposição
+  regime_exposure: 0.5      # fração investida em regime desfavorável
+  vol_lookback: 63          # usado no filtro de volatilidade
+  max_vol_annual: 0.60      # exclui ativos acima de 60% de vol anualizada
+
+costs:
+  commission: 0.0           # XP: corretagem zero em ações via plataforma
+  b3_fees: 0.0003           # emolumentos + liquidação aproximados
+  slippage: 0.001           # 0,1% por lado
+
+backtest:
+  start: "2015-01-01"
+  initial_capital: 100000
+  cdi_annual: 0.11          # usado só como referência fixa se a série do BCB falhar
+
+execution:
+  mode: "paper"             # paper | telegram | mt5
+  capital_per_position: 500 # R$ por ativo durante o teste
+  use_fractional: true      # usa mercado fracionário (sufixo F) para valores pequenos
+  state_file: "state/portfolio.json"
+  dry_run: true             # com mt5: só simula o envio de ordens
+
+telegram:
+  token_env: "TELEGRAM_TOKEN"
+  chat_id_env: "TELEGRAM_CHAT_ID"
+
+mt5:
+  login_env: "MT5_LOGIN"
+  password_env: "MT5_PASSWORD"
+  server: "XPMT5-PRD"       # conta demo: XPMT5-DEMO
+  terminal_path: "C:/Program Files/MetaTrader 5/terminal64.exe"
