@@ -53,6 +53,19 @@ Teste feito em 26/10/2026 (CAGR, drawdown máximo, Sharpe sobre o CDI):
 
 A reposição diária ficou cerca de 2 pontos ao ano acima da versão semanal nas duas janelas e com stops de 10% a 20%, mas ganhou em só 6 de 12 anos. O stop no pregão não melhorou nenhuma variante. Nos últimos 5 anos nenhuma variante superou o Ibovespa ou o CDI.
 
+### SMA de saída mais longa e regime persistente
+
+`exit_sma` separa a média de saída da média de entrada, e `exit_confirm_days` exige N pregões seguidos abaixo dela. `regime_confirm_weeks` só troca o regime depois de N semanas seguidas do outro lado da SMA200.
+
+Teste feito em 26/10/2026 com 60 combinações (`exit_sma` 50/100/150/200, `exit_confirm_days` 1/3/5, `regime_confirm_weeks` 1 a 4 ou filtro desligado), nas versões semanal e diária. Os parâmetros foram avaliados de 2015 a out/2021 e conferidos de out/2021 a hoje:
+
+- de 2015 a 2021, todas as 120 rodadas superaram o Ibovespa (12,2% a.a.), por 7 a 14 pontos ao ano
+- de 2021 a hoje, nenhuma superou o Ibovespa (11,3% a.a.); a melhor ficou 1,5 ponto abaixo
+- a correlação entre o excesso dentro e fora da amostra foi 0,02 (semanal) e 0,39 (diária)
+- desligar o filtro de regime foi o fator com melhor média fora da amostra, com drawdown de até -34% em 2015 a 2021
+
+O universo com pesos iguais, sem estratégia, rendeu 25,7% a.a. de 2015 a 2021 e 7,7% a.a. de 2021 a hoje, contra 12,2% e 10,7% do Ibovespa. A vantagem do primeiro período vem da escolha do universo (viés de sobrevivência). No segundo, as 10 maiores empresas do índice subiram em média 149% e as outras 40 subiram 42%. Uma cesta de pesos iguais tirada desse universo fica atrás de um índice ponderado por valor de mercado nesse tipo de período.
+
 ### Viés de sobrevivência
 
 O universo é a lista atual de ações do Ibovespa aplicada ao passado. Empresas que saíram do índice ou da bolsa desde 2015 não entram no teste, e empresas que só entraram no índice depois de subir entram desde o início. Isso favorece a cesta na comparação com o Ibovespa. O relatório mostra quantos ativos tinham cotação na data inicial. Não há fonte gratuita da composição histórica do índice. Trate o excesso sobre o Ibovespa como limite superior.

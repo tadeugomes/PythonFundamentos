@@ -60,10 +60,13 @@ strategy:
   momentum_lookback: 252    # 12 meses em pregões
   momentum_skip: 21         # ignora o último mês (reversão de curto prazo)
   trend_sma: 50             # só entra acima da média de 50 dias
+  exit_sma: 50              # sai abaixo desta média (100, 150, 200 testadas: sem ganho fora da amostra)
+  exit_confirm_days: 1      # pregões seguidos abaixo da média de saída antes de vender
   trailing_stop: 0.12       # sai se cair 12% do pico desde a entrada
   min_hold_weeks: 2         # evita giro excessivo
   regime_sma: 200           # IBOV abaixo da SMA200 => reduz exposição
-  regime_exposure: 0.5      # fração investida em regime desfavorável
+  regime_exposure: 0.5      # fração investida em regime desfavorável (1.0 desliga o filtro)
+  regime_confirm_weeks: 1   # semanas seguidas do outro lado da SMA200 para trocar o regime
   vol_lookback: 63          # usado no filtro de volatilidade
   max_vol_annual: 0.60      # exclui ativos acima de 60% de vol anualizada
   resize_on_regime: true    # na troca de regime, reduz/recompõe as posições já abertas
