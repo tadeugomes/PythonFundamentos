@@ -104,9 +104,12 @@ def main():
     start = (pd.Timestamp.today() - pd.DateOffset(months=18)).strftime("%Y-%m-%d")
     tickers = cfg["universe"]
     # sem cache: a janela de 18 meses não pode sobrescrever o histórico longo do backtest
-    prices = load_prices(tickers + [cfg["benchmark"]], start, refresh=True, cache=False)
+    prices, volume = load_prices(tickers + [cfg["benchmark"]], start, refresh=True, cache=False,
+                                 extra=("Volume",))
     bench = prices[cfg["benchmark"]].dropna()
-    prices = prices[tickers]
+    prices, volume = prices[tickers], volume[tickers]
+    # tamanho: volume financeiro médio de 252 pregões (size_top e weighting: liquidity)
+    size = (prices * volume).rolling(252, min_periods=126).mean().iloc[-1]
     asof = str(prices.index[-1].date())
     if state.get("prices_asof") == asof and not args.force:
         # repetir a rodada contaria mais uma semana de posse e duplicaria o histórico
@@ -123,15 +126,19 @@ def main():
     weekly = (not (daily_check or daily_refill) or asof_ts.weekday() == 4 or last_weekly is None
               or (asof_ts - pd.Timestamp(last_weekly)).days >= 7)
     if weekly:
-        d = decide(prices, bench, holdings, cfg, fund)
+        d = decide(prices, bench, holdings, cfg, fund, size=size)
     else:
-        d = decide(prices, bench, holdings, cfg, fund, exits=daily_check, rank_exit=False)
+        d = decide(prices, bench, holdings, cfg, fund, exits=daily_check, rank_exit=False, size=size)
         if prev_exposure is not None:
             d.exposure = prev_exposure  # regime só muda na decisão semanal
         if not daily_refill:
             d.buy = []
     px = prices.iloc[-1]
-    cap = ex["capital_per_position"] * d.exposure
+    # capital_per_position vale para pesos iguais (1/n); com pesos por liquidez, escala pelo peso
+    n_pos = st["n_positions"]
+
+    def cap(t):
+        return ex["capital_per_position"] * n_pos * d.weights.get(t, 1 / n_pos) * d.exposure
     resize = (weekly and st.get("resize_on_regime", True)
               and prev_exposure is not None and d.exposure != prev_exposure)
 
@@ -152,7 +159,7 @@ def main():
             if resize:
                 for t in d.hold:
                     price = br.last_price(t) or px[t]
-                    delta = br.quantity_for(cap, price) - int(holdings[t].qty)
+                    delta = br.quantity_for(cap(t), price) - int(holdings[t].qty)
                     if delta < 0:
                         orders = br.sell(t, -delta, frac, dry_run, fallback_qty=int(holdings[t].qty))
                         resized[t] = -filled(orders)[0]
@@ -164,7 +171,7 @@ def main():
                     executed += orders
             for t in d.buy:
                 price = br.last_price(t) or px[t]
-                orders = br.buy(t, br.quantity_for(cap, price), frac, dry_run)
+                orders = br.buy(t, br.quantity_for(cap(t), price), frac, dry_run)
                 executed += orders
                 qty, avg = filled(orders)
                 bought[t] = (qty, avg or float(px[t]))
@@ -173,8 +180,8 @@ def main():
     else:
         sold = {t: holdings[t].qty for t in d.sell}
         if resize:
-            resized = {t: cap / px[t] - holdings[t].qty for t in d.hold}
-        bought = {t: (cap / px[t], float(px[t])) for t in d.buy}
+            resized = {t: cap(t) / px[t] - holdings[t].qty for t in d.hold}
+        bought = {t: (cap(t) / px[t], float(px[t])) for t in d.buy}
 
     holdings_before = {t: Position(**h.__dict__) for t, h in holdings.items()}
     not_filled = []

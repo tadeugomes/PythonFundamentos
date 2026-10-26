@@ -66,6 +66,18 @@ Teste feito em 26/10/2026 com 60 combinações (`exit_sma` 50/100/150/200, `exit
 
 O universo com pesos iguais, sem estratégia, rendeu 25,7% a.a. de 2015 a 2021 e 7,7% a.a. de 2021 a hoje, contra 12,2% e 10,7% do Ibovespa. A vantagem do primeiro período vem da escolha do universo (viés de sobrevivência). No segundo, as 10 maiores empresas do índice subiram em média 149% e as outras 40 subiram 42%. Uma cesta de pesos iguais tirada desse universo fica atrás de um índice ponderado por valor de mercado nesse tipo de período.
 
+### Maiores empresas, núcleo em BOVA11, Tarpon e infraestrutura
+
+Teste feito em 26/10/2026, com parâmetros avaliados de 2015 a out/2021 e conferidos de out/2021 a hoje. Scripts em `experimentos/`.
+
+Opção 1, ranking só entre as K ações mais negociadas (`size_top`) e peso por liquidez (`weighting: liquidity`). O volume financeiro médio de 252 pregões substitui o valor de mercado, que não tem histórico gratuito. Com `size_top` de 6 a 12, peso por liquidez e `regime_exposure: 1.0`, a estratégia superou o Ibovespa nos dois períodos. Com K = 10 na versão semanal: 15,0% a.a. de 2015 a 2021 (Ibovespa 12,2%) e 17,1% a.a. de 2021 a hoje (Ibovespa 11,3%), com drawdown de -15,6% e -17,4%. Com K = 14 o resultado fora da amostra fica abaixo do índice. Ano a ano, K = 10 ganhou do Ibovespa em 6 de 11 anos. Na grade de 32 combinações, a correlação entre o excesso dentro e fora da amostra foi -0,11, então a escolha de K = 10 se apoia na faixa de 6 a 12 que funcionou nos dois períodos, não na melhor rodada de 2015 a 2021.
+
+Opção 2, parte em BOVA11 e parte na estratégia, rebalanceado todo mês. O resultado fica entre os dois componentes. Com a estratégia padrão, nenhuma proporção superou o Ibovespa de 2021 a hoje (melhor: 10,1% a.a. com 80% em BOVA11). Com K = 10 como satélite e 50% em BOVA11: 14,0% a.a. de 2015 a 2021 e 14,4% a.a. de 2021 a hoje, com drawdown de -26% e -18%. O bot não compra BOVA11, a parcela do núcleo é manual.
+
+Tarpon GT. A CVM publica a carteira mensal dos fundos (CDA) e a cota diária. O Tarpon GT FIC FIA (CNPJ 22.232.927/0001-90) rendeu 19,1% a.a. líquido de taxas de nov/2021 a set/2026, contra 12,7% do Ibovespa, com drawdown de -18,2%. Uma réplica que compra a carteira publicada do master (27.389.566/0001-03) com 1 mês de atraso rendeu 18,2% a.a., e com 3 meses de atraso, 15,5% a.a., com drawdown de -29% e -34%. A réplica tem até 40% num único papel. A carteira só é conhecida com atraso e, de abr a set/2026, está sob sigilo. PORT3 não tem histórico no Yahoo e usa o preço implícito da CVM, sem dividendos. Escolher a Tarpon depois de saber que ela foi bem também é viés de seleção.
+
+Infraestrutura. Universo de 31 empresas de concessões, saneamento, energia, logística e locação, incluindo AMBP3. De 2021 a hoje, a cesta passiva de pesos iguais rendeu 12,1% a.a. (Ibovespa 11,3%), com drawdown de -26,1%. As versões com a estratégia ficaram entre 3,7% e 7,2% a.a. De 2015 a 2021, nenhuma versão com estratégia superou o Ibovespa.
+
 ### Viés de sobrevivência
 
 O universo é a lista atual de ações do Ibovespa aplicada ao passado. Empresas que saíram do índice ou da bolsa desde 2015 não entram no teste, e empresas que só entraram no índice depois de subir entram desde o início. Isso favorece a cesta na comparação com o Ibovespa. O relatório mostra quantos ativos tinham cotação na data inicial. Não há fonte gratuita da composição histórica do índice. Trate o excesso sobre o Ibovespa como limite superior.

@@ -29,6 +29,7 @@ def run(
     cfg: dict,
     start: str,
     cdi: pd.Series | None = None,
+    volume: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Simula dia a dia. Sexta: decisão completa. Outros dias: conforme `strategy.check`,
     `strategy.refill` e `strategy.stop_type`. Decisões no fechamento, execução na abertura seguinte."""
@@ -51,6 +52,8 @@ def run(
     signal_days = sorted({days.asof(f) for f in fridays})
     weekly_set = set(signal_days)
     sim_days = days[days >= signal_days[0]]
+    # tamanho: volume financeiro médio de 252 pregões, só com dados até cada data
+    adtv = (close * volume).rolling(252, min_periods=126).mean() if volume is not None else None
     rows, trades = [], []
     state = {"cash": cash, "prev_exposure": None}
     exposure = 1.0
@@ -75,12 +78,15 @@ def run(
         equity_now = cash + sum(p.qty * px[t] for t, p in holdings.items() if not pd.isna(px[t]))
         per_pos = equity_now * d.exposure / target_n
 
+        def target(t):
+            return equity_now * d.exposure * d.weights.get(t, 1 / target_n)
+
         # mudança de regime: leva as posições mantidas ao novo tamanho alvo
         if weekly and resize and state["prev_exposure"] is not None and d.exposure != state["prev_exposure"]:
             for t, pos in holdings.items():
                 if pd.isna(px[t]):
                     continue
-                delta = per_pos / px[t] - pos.qty
+                delta = target(t) / px[t] - pos.qty
                 if delta < 0:
                     cash += -delta * px[t] * (1 - cost)
                     pos.qty += delta
@@ -94,11 +100,11 @@ def run(
             state["prev_exposure"] = d.exposure
 
         for t in d.buy:
-            if len(holdings) >= target_n or cash < per_pos * 0.5:
+            if len(holdings) >= target_n or cash < min(per_pos, target(t)) * 0.5:
                 break
             if t in holdings or pd.isna(px.get(t)):
                 continue
-            amount = min(per_pos, cash)
+            amount = min(target(t), cash)
             qty = amount * (1 - cost) / px[t]
             cash -= amount
             holdings[t] = Position(entry_price=px[t], peak=px[t], qty=qty)
@@ -135,13 +141,15 @@ def run(
 
         if s in weekly_set:
             equity = state["cash"] + sum(p.qty * close_ff.at[s, t] for t, p in holdings.items())
-            d = decide(close.loc[:s], bench.loc[:s], holdings, cfg)
+            size = adtv.loc[s] if adtv is not None else None
+            d = decide(close.loc[:s], bench.loc[:s], holdings, cfg, size=size)
             exposure = d.exposure
             rows.append({"date": s, "equity": equity, "cash": state["cash"], "n": len(holdings),
                          "exposure": d.exposure})
             pending = (d, True)
         elif daily_check or daily_refill:
-            d = decide(close.loc[:s], bench.loc[:s], holdings, cfg, exits=daily_check, rank_exit=False)
+            size = adtv.loc[s] if adtv is not None else None
+            d = decide(close.loc[:s], bench.loc[:s], holdings, cfg, exits=daily_check, rank_exit=False, size=size)
             d.exposure = exposure  # regime só muda na sexta
             if not daily_refill:
                 d.buy = []
@@ -201,10 +209,10 @@ def main():
     warmup = (pd.Timestamp(start) - pd.DateOffset(months=15)).strftime("%Y-%m-%d")
 
     tickers = cfg["universe"]
-    close, open_, low = load_prices(tickers + [cfg["benchmark"]], warmup, refresh=args.refresh,
-                                    extra=("Open", "Low"))
+    close, open_, low, volume = load_prices(tickers + [cfg["benchmark"]], warmup, refresh=args.refresh,
+                                            extra=("Open", "Low", "Volume"))
     bench = close[cfg["benchmark"]].dropna()
-    close, open_, low = close[tickers], open_[tickers], low[tickers]
+    close, open_, low, volume = close[tickers], open_[tickers], low[tickers], volume[tickers]
 
     try:
         cdi = load_cdi_daily(warmup)
@@ -213,7 +221,7 @@ def main():
         cdi = None
     use_yield = cfg["backtest"].get("cash_yield", True) and not args.no_cash_yield
 
-    curve, trades = run(close, open_, low, bench, cfg, start, cdi if use_yield else None)
+    curve, trades = run(close, open_, low, bench, cfg, start, cdi if use_yield else None, volume)
     bench_w = bench.reindex(curve.index, method="ffill")
     bench_w = bench_w / bench_w.iloc[0] * curve["equity"].iloc[0]
     if cdi is not None:

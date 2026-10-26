@@ -67,6 +67,9 @@ strategy:
   regime_sma: 200           # IBOV abaixo da SMA200 => reduz exposição
   regime_exposure: 0.5      # fração investida em regime desfavorável (1.0 desliga o filtro)
   regime_confirm_weeks: 1   # semanas seguidas do outro lado da SMA200 para trocar o regime
+  size_top: 0               # >0: ranking só entre as K mais negociadas (volume financeiro de 252 pregões)
+  weighting: "equal"        # equal (1/n) | liquidity (peso pelo volume financeiro)
+  max_weight: 0.25          # teto por ativo com weighting: liquidity
   vol_lookback: 63          # usado no filtro de volatilidade
   max_vol_annual: 0.60      # exclui ativos acima de 60% de vol anualizada
   resize_on_regime: true    # na troca de regime, reduz/recompõe as posições já abertas

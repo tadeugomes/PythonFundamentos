@@ -34,6 +34,7 @@ class Decision:
     exposure: float = 1.0
     reasons: dict[str, str] = field(default_factory=dict)
     scores: pd.Series | None = None
+    weights: dict[str, float] = field(default_factory=dict)  # fração da carteira por ativo (sem regime)
 
 
 def momentum_12_1(prices: pd.DataFrame, lookback: int, skip: int) -> pd.Series:
@@ -90,12 +91,14 @@ def decide(
     fund: pd.DataFrame | None = None,
     exits: bool = True,
     rank_exit: bool = True,
+    size: pd.Series | None = None,
 ) -> Decision:
     """Decisão com base nos dados até a última linha de `prices`.
 
     Na sexta roda completa. Nos outros dias (checagem diária) usa `rank_exit=False`,
     porque sair do top momentum é critério de reavaliação semanal, ou `exits=False`
     para só preencher vagas abertas.
+    `size`: volume financeiro médio por ativo, usado por `size_top` e `weighting: liquidity`.
     """
     s = cfg["strategy"]
     n = s["n_positions"]
@@ -114,6 +117,9 @@ def decide(
 
     eligible = (last > sma) & (vol <= s["max_vol_annual"]) & mom.notna() & last.notna()
     eligible &= pd.Series({t: fundamental_ok(fund, t) for t in prices.columns})
+    if s.get("size_top", 0) and size is not None:
+        biggest = size.dropna().sort_values(ascending=False).index[: s["size_top"]]
+        eligible &= eligible.index.isin(biggest)
     ranked = mom[eligible].sort_values(ascending=False)
     pool = set(ranked.index[: 2 * n])  # zona de permanência: top 2n
 
@@ -145,4 +151,28 @@ def decide(
             continue
         d.buy.append(t); d.reasons[t] = f"momentum 12-1 {ranked[t]:+.1%}"
         slots -= 1
+    d.weights = target_weights(d.hold + d.buy, n, s, size)
     return d
+
+
+def target_weights(names: list[str], n: int, s: dict, size: pd.Series | None) -> dict[str, float]:
+    """Pesos alvo. Pesos iguais: 1/n cada. Liquidez: as k posições somam k/n,
+    divididas pelo volume financeiro, com teto `max_weight` por ativo."""
+    if not names:
+        return {}
+    if s.get("weighting", "equal") != "liquidity" or size is None:
+        return {t: 1 / n for t in names}
+    total = len(names) / n
+    w = size.reindex(names).fillna(0).clip(lower=0)
+    if w.sum() <= 0:
+        return {t: 1 / n for t in names}
+    w = w / w.sum() * total
+    cap = s.get("max_weight", 0.25)
+    for _ in range(20):  # redistribui o excesso acima do teto
+        over = w > cap
+        if not over.any() or over.all():
+            break
+        excess = (w[over] - cap).sum()
+        w[over] = cap
+        w[~over] += excess * w[~over] / w[~over].sum()
+    return w.clip(upper=cap).to_dict()

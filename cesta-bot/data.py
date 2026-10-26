@@ -13,7 +13,7 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 B3_TZ = "America/Sao_Paulo"
 B3_DATA_READY_HOUR = 18  # depois do leilão de fechamento
-FIELDS = ("Close", "Open", "Low")
+FIELDS = ("Close", "Open", "Low", "Volume")
 
 
 def _yf_symbol(ticker: str) -> str:
